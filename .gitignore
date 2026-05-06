@@ -27,3 +27,5 @@ scratchpad/
 tmp/
 .pi
 .worktrees/
+
+.github
