@@ -26,3 +26,4 @@ scratchpad/
 *.egg-info/
 tmp/
 .pi
+.worktrees/
