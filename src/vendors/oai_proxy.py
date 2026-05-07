@@ -4,9 +4,9 @@ Some OpenAI-compatible proxies (notably the Azure-hosted gateway used in
 this project's ``.env``) authenticate at the gateway layer with a custom
 ``X-API-Key`` header rather than the standard ``Authorization`` bearer.
 Neither the openai SDK nor litellm send that header by default, so we
-wrap ``litellm.completion`` / ``litellm.acompletion`` once at process
-start to splice it into ``extra_headers`` whenever ``X_API_KEY`` is set
-in the environment.
+wrap ``litellm.completion`` / ``litellm.acompletion`` and the Responses
+API equivalents once at process start to splice it into
+``extra_headers`` whenever ``X_API_KEY`` is set in the environment.
 
 Call :func:`install` once after ``load_dotenv`` and before any system
 issues an LLM call. Idempotent.
@@ -35,14 +35,20 @@ def install() -> bool:
     if not x_api_key:
         return False
 
-    orig_completion = litellm.completion
-    orig_acompletion = litellm.acompletion
-
     def _inject(kwargs: dict[str, Any]) -> dict[str, Any]:
         headers = dict(kwargs.get("extra_headers") or {})
         headers.setdefault("X-API-Key", x_api_key)
         kwargs["extra_headers"] = headers
         return kwargs
+
+    # litellm exposes both sync and async wrappers for chat completions and
+    # for the OpenAI Responses API. Systems in this repo use both paths
+    # (icl's openai-native branch goes through litellm.responses), so wrap
+    # all four.
+    orig_completion = litellm.completion
+    orig_acompletion = litellm.acompletion
+    orig_responses = litellm.responses
+    orig_aresponses = litellm.aresponses
 
     def completion(*args: Any, **kwargs: Any) -> Any:
         return orig_completion(*args, **_inject(kwargs))
@@ -50,7 +56,15 @@ def install() -> bool:
     async def acompletion(*args: Any, **kwargs: Any) -> Any:
         return await orig_acompletion(*args, **_inject(kwargs))
 
+    def responses(*args: Any, **kwargs: Any) -> Any:
+        return orig_responses(*args, **_inject(kwargs))
+
+    async def aresponses(*args: Any, **kwargs: Any) -> Any:
+        return await orig_aresponses(*args, **_inject(kwargs))
+
     litellm.completion = completion
     litellm.acompletion = acompletion
+    litellm.responses = responses
+    litellm.aresponses = aresponses
     setattr(litellm, _INSTALLED_FLAG, True)
     return True

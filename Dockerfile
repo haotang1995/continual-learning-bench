@@ -79,3 +79,21 @@ RUN HOME=/opt/claude-cli curl -fsSL https://claude.ai/install.sh | HOME=/opt/cla
 
 # W&B (Weights & Biases) — pre-install so training scripts can log metrics
 RUN pip install --no-cache-dir --break-system-packages wandb
+
+# uv — official Python package manager used by this repo. README expects
+# `uv sync --all-extras` to materialise the .venv with project deps
+# (litellm, dotenv, etc). Installed system-wide so any user can use it.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# Runtime env contract for clbench:
+#
+#   /workspace/.env must define:
+#     OPENAI_API_KEY    — placeholder accepted by the openai/litellm SDKs
+#     OPENAI_BASE_URL   — custom OAI-compatible proxy URL (no /v1 suffix
+#                         issues; litellm honours this verbatim)
+#     X_API_KEY         — proxy gateway key. src/vendors/oai_proxy.py
+#                         injects this into extra_headers["X-API-Key"]
+#                         on every litellm.{,a}completion call.
+#
+# Without X_API_KEY, the proxy 403s "Invalid API Key" regardless of the
+# bearer token. See progress/plan_oai_wiring.md for the full rationale.
