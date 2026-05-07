@@ -1,7 +1,7 @@
 # Current Progress
 
-**Active sub-step**: S0 — Probe proxy `/models`.
+**Active sub-step**: S5 — Document `.env` requirement in Dockerfile.
 
-**Done**: plan written; S1 (.env) ✅; uv + .venv bootstrapped.
+**Done**: S0, S1, S2, S3, S4 — wrap installed, smoke test green against proxy.
 
-**Up next**: S0 → S2 → S3 → S4 → S5 → S6 → S7.
+**Up next**: S5 → S6 (clbench run) → S7.

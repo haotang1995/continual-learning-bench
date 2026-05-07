@@ -63,6 +63,12 @@ from .trace_storage import (
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+# Inject X-API-Key for OpenAI-compatible proxies that gate on it.
+# Must run after load_dotenv() and before any system imports a litellm client.
+from .vendors import oai_proxy as _oai_proxy  # noqa: E402
+
+_oai_proxy.install()
+
 
 def _configure_cli_logging(
     debug_enabled: bool,
