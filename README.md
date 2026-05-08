@@ -26,6 +26,26 @@ clbench list
 clbench run exploitable_poker --schedule quick_test --system icl
 ```
 
+### Routing through an OpenAI-compatible proxy
+
+If your provider is fronted by a custom OpenAI-compatible gateway that authenticates with a non-standard `X-API-Key` header (in addition to the bearer token), set both keys plus the base URL in `.env`:
+
+```env
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://your-proxy.example.com/v1
+X_API_KEY=...
+```
+
+`src/vendors/oai_proxy.py` is wired into `src/cli.py` and runs after `load_dotenv()`, transparently injecting `X-API-Key` into every `litellm.completion / acompletion / responses / aresponses` call. No system-side changes are required.
+
+If your proxy fronts an Azure OpenAI deployment that gates the Responses API on an `api-version` query string the proxy doesn't forward, run icl in chat-completions mode:
+
+```bash
+clbench run --config configs/exploitable_poker/exploitable_poker_icl.json \
+  --system-params '{"provider_mode":"litellm_chat"}' \
+  --no-live-dashboard
+```
+
 The [Quickstart Guide](https://continual-learning-bench.com/docs/quickstart/) walks through the same flow in more detail, including how to inspect tasks, systems, schedules, and run outputs.
 
 ## Further Documentation
