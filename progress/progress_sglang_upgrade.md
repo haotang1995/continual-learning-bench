@@ -221,3 +221,76 @@ problem, not a Dockerfile problem.
 **Next:** record this outcome, commit Dockerfile.newer_sglang, then attempt
 Smoke 2 (Qwen3.5-2B GRPO). Qwen3.5-2B (~4 GB bf16) is smaller and may fit
 in the available 4 GiB free per GPU. If it also OOMs, document and stop.
+
+## Attempt 8 — slime GRPO blocked by torch ABI mismatch (failed, structural)
+
+**Date:** 2026-05-10
+**Goal:** verify slime + megatron-bridge + flash_attn imports inside the
+new image so that a Qwen3.5-2B GRPO smoke is possible at least at import
+time (full training was already known to be GPU-memory-blocked).
+
+**Result:** the torch upgrade from 2.9.1+cu129 → 2.11.0+cu130 (forced by
+sglang 0.5.11's hard pin) breaks slime's pre-compiled extensions:
+- `flash_attn` 2.7.4.post1 — `flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so`
+  has `undefined symbol: _ZN3c104cuda29c10_cuda_check_implementation...`.
+  Built against torch 2.9 c10 ABI, doesn't link against torch 2.11.
+- `transformer_engine` 2.10.0 — same undefined symbol, same root cause.
+- Therefore `megatron.bridge` cannot import (it depends on
+  transformer_engine), which means **slime's training pipeline cannot
+  start** in this image, regardless of GPU memory.
+
+Tried mitigations:
+1. **Rebuild flash-attn from source** — `pip install flash-attn==2.7.4.post1
+   --no-build-isolation`. Failed: nvcc on the slime base is CUDA 12.9 but
+   torch was built with CUDA 13.0 (`The detected CUDA version (12.9)
+   mismatches the version that was used to compile PyTorch (13.0)`). Would
+   require installing CUDA 13 toolkit (apt cuda-toolkit-13-0, ~3 GB
+   download + ~15-30 min source build).
+2. **Upgrade transformer_engine to 2.14.1+cu13torch26.03** — install OK but
+   import fails with `OSError: ... libtransformer_engine.so: undefined
+   symbol: cublasLtGroupedMatrixLayoutInit_internal, version
+   libcublasLt.so.13`. The TE 2.14.1 wheel was built against a newer
+   cublas than the installed `nvidia-cublas==13.1.0.3` provides. Requires
+   another upgrade of cublas to a version that has that symbol.
+3. **Install flash-attn 2.8.3 prebuilt** — same nvcc CUDA 12.9 vs torch
+   cu130 mismatch on the build attempt; no prebuilt wheel exists for
+   torch 2.11+cu130 in the flash-attention release assets.
+
+**Structural conclusion:** on the slime base + sglang 0.5.11 path, getting
+slime's training stack to load again would require, at minimum:
+1. apt install cuda-toolkit-13-0 (Dockerfile change, root in build context).
+2. Rebuild flash-attn from source against torch 2.11+cu130 (~15-30 min).
+3. Install transformer_engine 2.14.1 + matching cublas wheel
+   (need to find cu13 cublas version aligned with TE 2.14.1).
+4. Possibly rebuild megatron-core if it pins torch ABI.
+
+**Status:** failed (structural). Smoke 2 (slime+sglang Qwen3.5-2B GRPO)
+cannot pass on the same image as Smoke 1 (sglang 0.5.11 Gemma-4 serve)
+without significant additional source-build work in the Dockerfile.
+
+**The fundamental conflict:** slime's pre-built extensions were compiled
+against torch 2.9.1+cu129 (slime base default). sglang 0.5.11 hard-pins
+torch 2.11+cu130 (no cu129 wheel available for Python 3.12). The only
+resolutions are:
+- (a) **Two-image strategy.** Keep `Dockerfile` (sglang 0.5.10.post1) for
+  slime GRPO; use `Dockerfile.newer_sglang` (sglang 0.5.11) for Gemma-4 /
+  V4 inference. Cleanest split, no source builds.
+- (b) **Source-build everything.** Add cuda-toolkit-13-0, rebuild
+  flash-attn + transformer_engine + cublas alignment in the Dockerfile.
+  Adds ~30-60 min build time + complexity, but gives a single unified
+  image. Requires uninterrupted GPU time for the smoke.
+- (c) **Wait for upstream alignment.** Future slime release built against
+  sglang 0.5.11 / torch 2.11+cu130 would solve this naturally.
+
+## Conclusion of this attempt
+
+Dockerfile.newer_sglang is **functional for sglang 0.5.11 inference of
+Gemma-4** on Ampere (sgl_kernel sm100 fallback works after cu13 lib path
+fix; Gemma-4 model class loads through to weight allocation). It is **not
+suitable for slime's GRPO training pipeline** without further extension
+rebuilds.
+
+End-to-end Smoke 1 (Gemma-4 generation) is independently blocked by host
+GPU memory contention (other workload using ~85% of each A6000); will
+re-run when GPUs free. End-to-end Smoke 2 (Qwen3.5-2B GRPO) is blocked at
+import time and cannot be resolved without choosing path (a)/(b) above.
