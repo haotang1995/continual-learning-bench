@@ -39,32 +39,27 @@ tests pass on 4×A6000.
 - [x] **Commit** `Dockerfile.newer_sglang` + progress entries (commit
       3f773bc); will commit this final progress update next.
 
-## Decision point for the user
+## Pivot to verl+vllm (2026-05-10)
 
-Three paths from here:
+The slime+sglang path hit structural ABI walls. Switched to a fresh
+attempt with `verlai/verl:vllm018.dev1` as the base (torch 2.10+cu129,
+flash-attn 2.8.3, TE 2.12, all aligned). vllm 0.19.x stays in this CUDA
+12.9 envelope, and verl's FSDP path doesn't need TE.
 
-**(a) Two-image strategy (recommended for time-to-value).** Keep both
-files: `Dockerfile` for slime GRPO training, `Dockerfile.newer_sglang`
-for sglang 0.5.11 inference. Each works; pick by use case. The
-"single image supports both" goal is dropped.
+**`Dockerfile.verl_vllm`** built green. Image size 32.9 GB.
 
-**(b) Source-build everything (recommended for production unification).**
-Extend `Dockerfile.newer_sglang` with:
-1. `apt install cuda-toolkit-13-0` (~3 GB).
-2. Rebuild `flash-attn==2.7.4.post1` from source against torch 2.11+cu130
-   (~15-30 min).
-3. Upgrade `transformer_engine` and `nvidia-cublas-cu13` to a matched
-   pair containing `cublasLtGroupedMatrixLayoutInit_internal`.
-4. Re-verify `megatron.bridge` import.
-Adds ~30-60 min to build time on first run; later builds cached.
+- ✅ **Smoke 1 (vllm serve Gemma-4):** end-to-end PASS. Single A6000,
+  prompt "In one short sentence, what is the capital of France?" →
+  "The capital of France is Paris." (8 tokens, finish_reason=stop).
+- ✅ **Smoke 2 (verl GRPO 1-step on Qwen3.5-2B):** end-to-end PASS.
+  4 GPUs FSDP, 8 train + 4 val rows GSM8K. Step 1 completed in 57.6s,
+  `critic/score/mean=0.25`, `max_memory_allocated_gb=9.2/GPU`.
 
-**(c) Wait for upstream alignment.** Future slime release built against
-sglang 0.5.11 / torch 2.11+cu130 (when slimerl publishes one) collapses
-this to a one-liner FROM slimerl/slime:newer-tag.
+**User request (current):** "real GRPO on Qwen3.5-2B. I wanna see some
+rewards climbing." → adding Smoke 3: longer training run (~30-50 steps)
+on a larger GSM8K slice with reward trajectory logging.
 
 ## Active blockers
 
-- **Slime GRPO** structurally blocked in `Dockerfile.newer_sglang` until
-  one of the paths above is chosen.
-- **Gemma-4 final generation** blocked by transient GPU memory contention
-  (will resolve when host workload finishes).
+(none for the new image — slime+sglang artifacts kept on disk for
+reference but no longer the primary path)

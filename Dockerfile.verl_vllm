@@ -1,0 +1,175 @@
+# Dockerfile.verl_vllm — opt-in image with vLLM 0.19.1 + verl 0.7.1
+#
+# Use this image for:
+#   - vllm serving for google/gemma-4-E2B-it (vllm 0.19.0+ ships its own
+#     Gemma4ForConditionalGeneration class; works on Ampere/sm86)
+#   - verl GRPO smoke on Qwen/Qwen3.5-2B (FSDP backend; no TE required)
+#
+# Why this base instead of slimerl/slime:latest?
+#   - slimerl/slime ships sgl_kernel that only includes sm90 + sm100 binaries.
+#     Forcing sglang ≥0.5.11 onto it pulled torch 2.11+cu130 and broke slime's
+#     pre-compiled flash_attn / transformer_engine (c10 ABI). See
+#     progress/progress_sglang_upgrade.md for the full story.
+#   - verlai/verl:vllm018.dev1 ships torch 2.10+cu129 + flash-attn 2.8.3 +
+#     megatron-core 0.16.0 + nvcc 12.9 toolkit, all aligned. vllm's prebuilt
+#     wheels include sm_86 first-class. Bumping vllm 0.18→0.19 stays within
+#     this CUDA 12.9 envelope (vllm 0.20+ jumps to torch 2.11+cu13 — avoid).
+#
+# Build:  docker build -f Dockerfile.verl_vllm -t clbench-verl-vllm .
+# Run:    docker run --rm -it --gpus all -v $PWD:/workspace clbench-verl-vllm
+
+FROM verlai/verl:vllm018.dev1
+
+# UTF-8 locale so tmux and Neovim draw box-drawing characters correctly
+ENV LANG=C.UTF-8
+
+# Dev tooling. The verl base ships build-essential, gcc, git, curl, wget,
+# nvcc; we add jq/ripgrep/unzip/gnupg used by our scripts and Microsoft/
+# Docker apt repo trust.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+  ca-certificates \
+  gnupg \
+  jq \
+  less \
+  openssh-client \
+  ripgrep \
+  tree \
+  unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 via NodeSource — needed for the npm-installed CLIs below
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y -qq --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Azure CLI — lets AzureCliCredential() work inside the container when the
+# host's ~/.azure is bind-mounted in. Required for TRAPI (MSR's OAuth-gated
+# Azure OpenAI gateway, api://trapi/.default). Microsoft's apt repo only
+# ships amd64; on arm64 fall back to pip per Microsoft's official guidance.
+RUN ARCH="$(dpkg --print-architecture)" \
+  && if [ "$ARCH" = "amd64" ]; then \
+       install -m 0755 -d /etc/apt/keyrings \
+       && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg \
+       && chmod a+r /etc/apt/keyrings/microsoft.gpg \
+       && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ $(. /etc/os-release && echo $VERSION_CODENAME) main" \
+            > /etc/apt/sources.list.d/azure-cli.list \
+       && apt-get update -qq \
+       && apt-get install -y -qq --no-install-recommends azure-cli \
+       && rm -rf /var/lib/apt/lists/*; \
+     else \
+       pip install --no-cache-dir --break-system-packages azure-cli; \
+     fi
+
+# Docker CLI — for sibling-container workflows. docker-ce-cli only.
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+  && chmod a+r /etc/apt/keyrings/docker.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+       > /etc/apt/sources.list.d/docker.list \
+  && apt-get update -qq \
+  && apt-get install -y -qq --no-install-recommends docker-ce-cli \
+  && rm -rf /var/lib/apt/lists/*
+
+# Non-root user (uid 1000) for Claude's --dangerously-skip-permissions.
+# verl base already has uid 1000 as 'ubuntu'; rename to 'sandbox' for
+# parity with our other Dockerfiles.
+RUN if getent passwd 1000 >/dev/null; then \
+      usermod -l sandbox -d /home/sandbox -m $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true; \
+    else \
+      groupadd -g 1000 sandbox && useradd -m -u 1000 -g sandbox sandbox; \
+    fi
+
+# Coding-agent CLIs
+RUN npm install -g @google/gemini-cli @openai/codex @github/copilot \
+  && npm cache clean --force
+
+# Claude Code — install via official script to a world-readable prefix so
+# the non-root sandbox user can execute it.
+RUN HOME=/opt/claude-cli curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude-cli bash \
+  && chmod -R a+rX /opt/claude-cli \
+  && ln -sf /opt/claude-cli/.local/bin/claude /usr/local/bin/claude
+
+# uv — used to materialize clbench's Python deps into the system Python.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# Install into the verl base's system Python (no .venv) — same UV-into-system
+# pattern as Dockerfile and Dockerfile.newer_sglang.
+ENV UV_PROJECT_ENVIRONMENT=/usr \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
+
+# ---- Project deps prebuild (clbench) — FIRST ----
+# Done before the vllm/verl version bump so the bump's stricter pins win
+# the final resolution. Clbench's `huggingface-hub`/`datasets` extras pull
+# in `tokenizers==0.23.1`, which would break `transformers==4.57.6` (which
+# pins tokenizers <=0.23.0). Stub README+src satisfy setuptools project
+# discovery without dragging in the real source (which lands at /workspace
+# via bind-mount; entrypoint will wire it editably).
+COPY pyproject.toml /tmp/clbench-build/pyproject.toml
+RUN cd /tmp/clbench-build \
+ && : > README.md \
+ && mkdir -p src && : > src/__init__.py \
+ && uv sync --all-extras --inexact --no-install-project \
+ && rm -rf /tmp/clbench-build
+
+# ---- Bump vllm 0.18.0 → 0.19.1 + install verl 0.7.1 ----
+#
+# vllm 0.19.0 added Gemma4ForCausalLM / Gemma4ForConditionalGeneration in
+# its own model registry (PR #38826). 0.19.1 is the latest 0.19.x bugfix.
+# We stay at vllm 0.19.x deliberately — 0.20.x bumped to torch 2.11+cu13
+# which would break the verl base's flash-attn 2.8.3 / TE 2.12 ABI.
+#
+# verl 0.7.1 is the version on PyPI matching this image's accelerate /
+# datasets / hydra-core stack (already preinstalled in the base).
+# Installed `--no-deps` because verl's transitive deps include vllm and
+# would re-resolve torch / flash-attn unnecessarily; the base + vllm bump
+# already provide what verl needs.
+#
+# vllm 0.19.0 pins transformers <5,>=4.56.0; vllm has its own gemma4
+# model files so it doesn't need transformers' Gemma-4 class. We let
+# vllm's resolver pick transformers (lands on 4.57.6) and downgrade
+# tokenizers to a compatible range (<=0.23.0).
+RUN uv pip install --break-system-packages --no-cache-dir \
+      "vllm==0.19.1" \
+ && uv pip install --break-system-packages --no-cache-dir \
+      --no-deps "verl==0.7.1" \
+ && python -c "import torch, vllm, verl, transformers, flash_attn, tokenizers; print('torch', torch.__version__, '| vllm', vllm.__version__, '| verl', getattr(verl, '__version__', '?'), '| transformers', transformers.__version__, '| flash_attn', flash_attn.__version__, '| tokenizers', tokenizers.__version__)"
+
+# Confirm vllm's Gemma-4 path resolves end-to-end (this is the key import
+# that broke in our earlier build — surfacing the tokenizers conflict).
+RUN python -c "from vllm.model_executor.models.gemma4_mm import Gemma4ForConditionalGeneration; print('Gemma4ForConditionalGeneration ok')"
+RUN python -c "from verl.trainer.ppo import ray_trainer; print('verl.trainer.ppo.ray_trainer ok')"
+
+# ---- Entrypoint ----
+# editable-install /workspace at container start so `clbench` resolves and
+# src/ edits are live, then exec the user's command. Written via shell-level
+# heredoc so this Dockerfile builds on the legacy docker builder (no buildx
+# required).
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -e' \
+  'if [ -f /workspace/pyproject.toml ]; then' \
+  '  uv pip install --quiet --no-deps -e /workspace \' \
+  '    || echo "warning: editable install of /workspace failed; clbench may be unavailable" >&2' \
+  'fi' \
+  'if [ "$#" -eq 0 ]; then' \
+  '  exec bash' \
+  'fi' \
+  'exec "$@"' \
+  > /usr/local/bin/clbench-entrypoint.sh \
+ && chmod a+rx /usr/local/bin/clbench-entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/clbench-entrypoint.sh"]
+CMD ["bash"]
+
+# Runtime env contract:
+#
+#   /workspace/.env (or `docker run -e ...`) must define:
+#     OPENAI_API_KEY    — placeholder for openai/litellm SDKs
+#     OPENAI_BASE_URL   — custom OAI-compatible proxy URL
+#     X_API_KEY         — proxy gateway key (X-API-Key header)
+#     HF_TOKEN          — HuggingFace read token; required for gated models
+#                         like google/gemma-4-E2B-it.

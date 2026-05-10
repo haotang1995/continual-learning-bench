@@ -294,3 +294,72 @@ End-to-end Smoke 1 (Gemma-4 generation) is independently blocked by host
 GPU memory contention (other workload using ~85% of each A6000); will
 re-run when GPUs free. End-to-end Smoke 2 (Qwen3.5-2B GRPO) is blocked at
 import time and cannot be resolved without choosing path (a)/(b) above.
+
+## Pivot — switch from slime+sglang to verl+vllm (2026-05-10)
+
+**Trigger:** survey of verl+vllm vs slime+sglang showed verl+vllm is the
+better fit for our hardware:
+- vllm ships sm_86 in its prebuilt CUDA arch list (sgl_kernel doesn't).
+- `verlai/verl:vllm018.dev1` ships torch 2.10+cu129 + flash-attn 2.8.3 +
+  TE 2.12 + megatron-core 0.16.0 + nvcc 12.9 toolkit, all aligned.
+- vllm 0.19.x stays on torch 2.10+cu129 (only 0.20+ moves to torch 2.11+
+  cu13). Bumping vllm 0.18→0.19 inside this base is a clean step that
+  preserves the ABI of the pre-compiled extensions.
+- verl's FSDP backend doesn't require transformer_engine (only Megatron
+  does). flash-attn is overrideable. So neither of the slime walls bites.
+
+## Attempt 9 — Dockerfile.verl_vllm (success, both smokes pass)
+
+**Date:** 2026-05-10
+**Goal:** new file `Dockerfile.verl_vllm` based on `verlai/verl:vllm018.dev1`,
+bump vllm to 0.19.1 (Gemma-4 capable), add verl 0.7.1 from PyPI, plus our
+existing tooling layer (Node/Azure/Docker-CLI/sandbox-user/npm CLIs/
+Claude-Code/uv).
+
+**Build journey (failures fixed in-attempt):**
+1. First build used `pip install vllm==0.19.1 verl==0.7.1` together:
+   pip's resolver hit `error: resolution-too-deep` on the combined
+   dependency graph. Fixed by switching to `uv pip install` (smarter
+   solver) and splitting into two steps (vllm first, then verl
+   `--no-deps`).
+2. Second build succeeded but `import transformers` failed with
+   `tokenizers>=0.22.0,<=0.23.0 is required ... found tokenizers==0.23.1`.
+   Same ordering issue I hit on Attempt 4: clbench's `uv sync --all-extras`
+   was running AFTER the version-bump and pulling tokenizers up. Fixed by
+   reordering to project-sync FIRST, version-bump LAST so the bump's
+   strict pins win the final state.
+3. Third build: green. In-build asserts
+   `Gemma4ForConditionalGeneration ok` and
+   `verl.trainer.ppo.ray_trainer ok` both pass. Image size 32.9 GB.
+
+**Versions in final image:**
+- Python 3.12.3, torch 2.10.0+cu129, vllm 0.19.1, verl 0.7.1,
+  transformers 4.57.6, flash-attn 2.8.3, tokenizers 0.23.0,
+  TE 2.12.0+5671fd3, megatron-core 0.16.0, ray 2.54.1.
+- Plus our standard CLI layer: uv 0.11.x, Node 22, Azure CLI, Docker CLI,
+  Claude Code, gemini-cli/codex/copilot.
+
+**Smoke 1 (vllm Gemma-4 serve):** PASS end-to-end.
+- `python -m vllm.entrypoints.openai.api_server --model google/gemma-4-E2B-it
+  --port 30000 --tensor-parallel-size 1 --gpu-memory-utilization 0.55
+  --max-model-len 4096 --trust-remote-code --enforce-eager`
+- Server boots, registers all OpenAI-compat routes, accepts
+  `/v1/chat/completions`. With prompt "In one short sentence, what is
+  the capital of France?" returned: **"The capital of France is Paris."**
+  (8 completion tokens, finish_reason "stop").
+- Single A6000 (GPU 0), gpu_memory_utilization 0.55 = ~25 GB reserved.
+
+**Smoke 2 (verl GRPO smoke on Qwen3.5-2B):** PASS end-to-end.
+- 4 GPUs (FSDP shard 4), 8 train rows + 4 val rows from GSM8K,
+  total_training_steps=1, rollout.n=2, max_response_length=256.
+- Loop completed: `step:1 / training/global_step:1 / training/epoch:0`,
+  `critic/score/mean:0.25` (1 of 4 dev rollouts got the right answer),
+  `perf/max_memory_allocated_gb:9.20` per GPU,
+  `timing_s/step:57.6` (one full GRPO step = generate + ref + advantages +
+  actor update + weights resync).
+- `actor/pg_loss:0.0` and `actor/grad_norm:0.0` are normal at step 1
+  (policy hasn't diverged from reference yet so KL=0 and advantages mean=0).
+
+**Status:** SUCCESS. Both smokes pass on `Dockerfile.verl_vllm`.
+**Next:** longer GRPO run to demonstrate rewards climbing (user request
+2026-05-10).
