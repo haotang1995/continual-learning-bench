@@ -3,7 +3,7 @@ name = "cl-benchmark"
 version = "0.1.0"
 description = "Benchmark framework for evaluating continual learning systems across sequential task instances"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=0.23.0",
     "litellm==1.81.6",

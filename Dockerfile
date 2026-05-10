@@ -1,28 +1,20 @@
-FROM ubuntu:24.04
+FROM slimerl/slime:latest
 
 # UTF-8 locale so tmux and Neovim draw box-drawing characters correctly
 ENV LANG=C.UTF-8
 
-# Build tools, common utilities, and agent dependencies
+# Dev tooling missing from the slime base. Pre-installed there: curl, less,
+# tree, wget, gpg, ssh, gcc, git, uv, wandb, torch, sglang.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
   build-essential \
   ca-certificates \
-  curl \
-  git \
   gnupg \
   jq \
-  less \
-  openssh-client \
-  python3 \
-  python3-pip \
-  python3-venv \
   ripgrep \
-  tree \
   unzip \
-  wget \
   && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 via NodeSource
+# Node.js 22 via NodeSource — needed for the npm-installed CLIs below
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y -qq --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
@@ -61,7 +53,6 @@ RUN install -m 0755 -d /etc/apt/keyrings \
   && rm -rf /var/lib/apt/lists/*
 
 # Non-root user (uid 1000) for Claude's --dangerously-skip-permissions
-# ubuntu:24.04 ships with a 'ubuntu' user at uid 1000; reuse it or create fresh.
 RUN if getent passwd 1000 >/dev/null; then \
       usermod -l sandbox -d /home/sandbox -m $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true; \
     else \
@@ -77,13 +68,46 @@ RUN HOME=/opt/claude-cli curl -fsSL https://claude.ai/install.sh | HOME=/opt/cla
   && chmod -R a+rX /opt/claude-cli \
   && ln -sf /opt/claude-cli/.local/bin/claude /usr/local/bin/claude
 
-# W&B (Weights & Biases) — pre-install so training scripts can log metrics
-RUN pip install --no-cache-dir --break-system-packages wandb
+# Install clbench third-party deps directly into the slime base's system Python
+# (no .venv anywhere). UV_PROJECT_ENVIRONMENT=/usr is uv's documented "install
+# to system Python instead of a venv" knob; --inexact preserves the slime
+# base's preinstalled torch/sglang/megatron stack instead of removing them
+# as "extraneous". UV_BREAK_SYSTEM_PACKAGES=1 lets uv write past Ubuntu's
+# EXTERNALLY-MANAGED marker.
+ENV UV_PROJECT_ENVIRONMENT=/usr \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
 
-# uv — official Python package manager used by this repo. README expects
-# `uv sync --all-extras` to materialise the .venv with project deps
-# (litellm, dotenv, etc). Installed system-wide so any user can use it.
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+# Build-time dep prebuild: COPY pyproject.toml only and run a minimal-project
+# uv sync. The src/ + README.md stubs satisfy setuptools/uv project-discovery
+# without pulling in the real source (which lands at /workspace via bind
+# mount). The project itself is wired up editably at runtime.
+COPY pyproject.toml /tmp/clbench-build/pyproject.toml
+RUN cd /tmp/clbench-build \
+ && : > README.md \
+ && mkdir -p src && : > src/__init__.py \
+ && uv sync --all-extras --inexact --no-install-project \
+ && rm -rf /tmp/clbench-build
+
+# Entrypoint: register /workspace as an editable install on container start so
+# `clbench` resolves and src/ edits are live, then exec the user's command.
+# The user never has to touch uv or activate anything.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/clbench-entrypoint.sh
+#!/usr/bin/env bash
+set -e
+if [ -f /workspace/pyproject.toml ]; then
+  uv pip install --quiet --no-deps -e /workspace \
+    || echo "warning: editable install of /workspace failed; clbench may be unavailable" >&2
+fi
+if [ "$#" -eq 0 ]; then
+  exec bash
+fi
+exec "$@"
+EOF
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/clbench-entrypoint.sh"]
+CMD ["bash"]
 
 # Runtime env contract for clbench:
 #
