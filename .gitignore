@@ -29,3 +29,5 @@ tmp/
 .worktrees/
 
 .github
+.smoke-tmp/
+.hf-cache/

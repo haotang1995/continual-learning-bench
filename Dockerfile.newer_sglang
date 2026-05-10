@@ -1,0 +1,169 @@
+# Dockerfile.newer_sglang — opt-in image with sglang 0.5.11 + transformers 5.8.0
+#
+# Use this instead of `Dockerfile` when you need:
+#   - sglang serving for google/gemma-4-E2B-it (needs sglang ≥0.5.11,
+#     transformers ≥5.5)
+#   - sglang code paths for deepseek-ai/DeepSeek-V4-Flash (Day-0 in 0.5.11)
+#   - GRPO training on Qwen/Qwen3.5-2B via slime+sglang
+#
+# Build:  docker build -f Dockerfile.newer_sglang -t clbench-sglang-newer .
+# Run:    docker run --rm -it --gpus all -v $PWD:/workspace clbench-sglang-newer
+#
+# Layout: this file mirrors the layout of `Dockerfile` so a diff between the
+# two surfaces only the version-bump block + this header.
+
+FROM slimerl/slime:latest
+
+# UTF-8 locale so tmux and Neovim draw box-drawing characters correctly
+ENV LANG=C.UTF-8
+
+# Dev tooling missing from the slime base. Pre-installed there: curl, less,
+# tree, wget, gpg, ssh, gcc, git, uv, wandb, torch, sglang.
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+  build-essential \
+  ca-certificates \
+  gnupg \
+  jq \
+  ripgrep \
+  unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 via NodeSource — needed for the npm-installed CLIs below
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y -qq --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Azure CLI — lets AzureCliCredential() work inside the container when the
+# host's ~/.azure is bind-mounted in. Required for TRAPI (MSR's OAuth-gated
+# Azure OpenAI gateway). amd64 via apt; arm64 falls back to pip.
+RUN ARCH="$(dpkg --print-architecture)" \
+  && if [ "$ARCH" = "amd64" ]; then \
+       install -m 0755 -d /etc/apt/keyrings \
+       && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg \
+       && chmod a+r /etc/apt/keyrings/microsoft.gpg \
+       && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ $(. /etc/os-release && echo $VERSION_CODENAME) main" \
+            > /etc/apt/sources.list.d/azure-cli.list \
+       && apt-get update -qq \
+       && apt-get install -y -qq --no-install-recommends azure-cli \
+       && rm -rf /var/lib/apt/lists/*; \
+     else \
+       pip install --no-cache-dir --break-system-packages azure-cli; \
+     fi
+
+# Docker CLI — for sibling-container workflows. docker-ce-cli only (no daemon).
+RUN install -m 0755 -d /etc/apt/keyrings \
+  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+  && chmod a+r /etc/apt/keyrings/docker.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+       > /etc/apt/sources.list.d/docker.list \
+  && apt-get update -qq \
+  && apt-get install -y -qq --no-install-recommends docker-ce-cli \
+  && rm -rf /var/lib/apt/lists/*
+
+# Non-root user (uid 1000) for Claude's --dangerously-skip-permissions
+RUN if getent passwd 1000 >/dev/null; then \
+      usermod -l sandbox -d /home/sandbox -m $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true; \
+    else \
+      groupadd -g 1000 sandbox && useradd -m -u 1000 -g sandbox sandbox; \
+    fi
+
+RUN npm install -g @google/gemini-cli @openai/codex @github/copilot \
+  && npm cache clean --force
+
+# Claude Code — install via official script to a world-readable prefix so the
+# non-root sandbox user can execute it.
+RUN HOME=/opt/claude-cli curl -fsSL https://claude.ai/install.sh | HOME=/opt/claude-cli bash \
+  && chmod -R a+rX /opt/claude-cli \
+  && ln -sf /opt/claude-cli/.local/bin/claude /usr/local/bin/claude
+
+ENV UV_PROJECT_ENVIRONMENT=/usr \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
+
+# ---- Project deps prebuild (mirrors Dockerfile, runs FIRST) ----
+# Done before the sglang version-bump so the bump's stricter pins win when
+# uv resolves the final state. With the reverse order, clbench's
+# `huggingface-hub`/`datasets` extras pull in `tokenizers==0.23.1`, which
+# breaks `transformers==5.6.0` (which pins tokenizers <=0.23.0).
+COPY pyproject.toml /tmp/clbench-build/pyproject.toml
+RUN cd /tmp/clbench-build \
+ && : > README.md \
+ && mkdir -p src && : > src/__init__.py \
+ && uv sync --all-extras --inexact --no-install-project \
+ && rm -rf /tmp/clbench-build
+
+# ---- The version-bump block (the *only* substantive difference vs Dockerfile) ----
+#
+# Slime ships sglang 0.5.10.post1 + transformers 5.3.0; both are below the
+# floor for Gemma-4 / DeepSeek-V4 / Qwen3.5 multimodal architectures. We
+# install sglang 0.5.11 from PyPI, which transitively pulls torch
+# 2.11+cu130 + flash-attn-4 + a CUDA-13 toolchain set of nvidia-* wheels.
+# That's a heavier change than the cu129 path would have been, but the only
+# cu129 sglang 0.5.11 wheel published is `cp310` (incompatible with slime's
+# Python 3.12), so cu130 is the only working option for this base.
+#
+# --prerelease=allow is required because sglang 0.5.11 depends on
+# flash-attn-4>=4.0.0b9.
+RUN uv pip install --break-system-packages --no-cache-dir \
+      --prerelease=allow \
+      "sglang==0.5.11" \
+ && python -c "import sglang, transformers, tokenizers, torch; print('sglang', sglang.__version__, '| transformers', transformers.__version__, '| tokenizers', tokenizers.__version__, '| torch', torch.__version__)"
+
+# ---- Post-bump fixes for Ampere (sm86) / cu13 compatibility ----
+#
+# 1. cu13 runtime libs (libnvrtc.so.13, libcudart.so.13, ...) ship under
+#    /usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib but are not on
+#    the default ld linker path. sgl_kernel needs libnvrtc.so.13 to load.
+#    The `sm100` common_ops shipped in the wheel is a "precise math
+#    fallback" that does run on sm86 (Ampere) — that's how slime's own base
+#    image works on A6000 — but only if the loader can find libnvrtc.so.13.
+#
+# 2. The slime base ships flashinfer-jit-cache==0.6.7.post3+cu129, but
+#    sglang 0.5.11 pulls flashinfer==0.6.8.post1; flashinfer's import-time
+#    version check rejects the mismatch. Upgrade flashinfer-jit-cache to
+#    match. If a matching cu130 jit-cache wheel doesn't exist, fall back
+#    to FLASHINFER_DISABLE_VERSION_CHECK=1 (set as ENV below).
+RUN uv pip install --break-system-packages --no-cache-dir \
+      --prerelease=allow \
+      --upgrade "flashinfer-jit-cache" \
+      || echo "warning: flashinfer-jit-cache upgrade failed; will rely on FLASHINFER_DISABLE_VERSION_CHECK=1"
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
+    FLASHINFER_DISABLE_VERSION_CHECK=1
+
+RUN python -c "from sglang.srt.configs.model_config import ModelConfig; print('sglang model_config import OK')"
+
+# Entrypoint: editable-install /workspace at container start so `clbench`
+# resolves and src/ edits are live, then exec the user's command. Written via
+# a shell-level heredoc inside RUN so this Dockerfile still builds on the
+# legacy (non-BuildKit) docker builder available in this environment.
+RUN printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -e' \
+  'if [ -f /workspace/pyproject.toml ]; then' \
+  '  uv pip install --quiet --no-deps -e /workspace \' \
+  '    || echo "warning: editable install of /workspace failed; clbench may be unavailable" >&2' \
+  'fi' \
+  'if [ "$#" -eq 0 ]; then' \
+  '  exec bash' \
+  'fi' \
+  'exec "$@"' \
+  > /usr/local/bin/clbench-entrypoint.sh \
+ && chmod a+rx /usr/local/bin/clbench-entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/clbench-entrypoint.sh"]
+CMD ["bash"]
+
+# Runtime env contract for clbench (same as Dockerfile, plus HF_TOKEN):
+#
+#   /workspace/.env (or `docker run -e ...`) must define:
+#     OPENAI_API_KEY    — placeholder accepted by the openai/litellm SDKs
+#     OPENAI_BASE_URL   — custom OAI-compatible proxy URL
+#     X_API_KEY         — proxy gateway key (X-API-Key header)
+#     HF_TOKEN          — Hugging Face read token; required for
+#                         `google/gemma-4-E2B-it` (gated) and other gated
+#                         model rollouts. sglang.launch_server reads it as
+#                         HUGGING_FACE_HUB_TOKEN / HF_TOKEN automatically.
