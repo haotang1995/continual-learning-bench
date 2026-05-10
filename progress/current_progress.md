@@ -55,11 +55,27 @@ flash-attn 2.8.3, TE 2.12, all aligned). vllm 0.19.x stays in this CUDA
   4 GPUs FSDP, 8 train + 4 val rows GSM8K. Step 1 completed in 57.6s,
   `critic/score/mean=0.25`, `max_memory_allocated_gb=9.2/GPU`.
 
-**User request (current):** "real GRPO on Qwen3.5-2B. I wanna see some
-rewards climbing." → adding Smoke 3: longer training run (~30-50 steps)
-on a larger GSM8K slice with reward trajectory logging.
+## Final state — all goals met
+
+✅ **Smoke 1 (vllm Gemma-4):** end-to-end PASS — "The capital of France
+   is Paris." (8 tokens, finish_reason=stop), 1× A6000.
+✅ **Smoke 2 (verl GRPO 1-step):** end-to-end PASS — Qwen3.5-2B FSDP shard 4,
+   step 1 in 57.6 s, score 0.25.
+✅ **Smoke 3 (verl GRPO 35-step real run):** end-to-end PASS — 45 min
+   total. Held-out GSM8K val accuracy: 0.391 → 0.656 → 0.641 → 0.625 →
+   0.625. **+60-68 % relative improvement** over baseline. Train rolling
+   mean (w=5): 0.34 → 0.65. Per-GPU peak memory 12.07 GB.
 
 ## Active blockers
 
-(none for the new image — slime+sglang artifacts kept on disk for
-reference but no longer the primary path)
+(none — `Dockerfile.verl_vllm` satisfies both Gemma-4 inference and
+Qwen3.5-2B real GRPO training on the local 4× A6000 host)
+
+## Slime+sglang artifacts kept for reference
+
+- `Dockerfile.newer_sglang` (slime+sglang 0.5.11 attempt) is no longer
+  the primary path; superseded by `Dockerfile.verl_vllm`. Kept on disk
+  for reference; can be removed in a future cleanup.
+- `Dockerfile` (slime+sglang 0.5.10.post1, original) still works for
+  users who specifically want sglang inference + slime training without
+  Gemma-4. No changes recommended.

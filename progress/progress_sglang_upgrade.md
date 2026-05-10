@@ -363,3 +363,63 @@ Claude-Code/uv).
 **Status:** SUCCESS. Both smokes pass on `Dockerfile.verl_vllm`.
 **Next:** longer GRPO run to demonstrate rewards climbing (user request
 2026-05-10).
+
+## Attempt 10 — real GRPO, 35 steps, rewards climbing (success)
+
+**Date:** 2026-05-10
+**Goal:** longer GRPO run on Qwen3.5-2B with reward trajectory logged, to
+demonstrate that the verl FSDP + vllm rollout pipeline actually learns
+on this hardware.
+
+**Setup:**
+- 35 steps × `train_batch_size=8` × `rollout.n=4` = 1120 trajectories.
+- 256 GSM8K train rows, 64 GSM8K test rows (held out).
+- Qwen3.5-2B as actor + reference, FSDP shard 4, vllm rollout TP=1
+  with `gpu_memory_utilization=0.4`, `enforce_eager=True`,
+  `max_prompt_length=512`, `max_response_length=512`.
+- KL loss coefficient 0.001 (regularize toward reference but allow
+  drift), entropy coefficient 0, gradient checkpointing on.
+- `test_freq=10` so val evaluation runs at steps 10/20/30 (and 35-final).
+- Hardware: 4× RTX A6000 fully free (other workload finished).
+
+**Run stats:** 35/35 steps, exit 0, **2693 s total = 44.9 min**, ~65 s/step.
+
+**Validation trajectory (held-out 64 GSM8K rows):**
+
+| step | val_acc | Δ vs baseline | rel improvement |
+|------|---------|---------------|-----------------|
+| 0    | 0.3906  | —             | —               |
+| 10   | 0.6562  | +0.2656       | +68.0 %         |
+| 20   | 0.6406  | +0.2500       | +64.0 %         |
+| 30   | 0.6250  | +0.2344       | +60.0 %         |
+| 35   | 0.6250  | +0.2344       | +60.0 %         |
+
+The model learned a clear, durable +60-68 % relative improvement on
+held-out GSM8K accuracy in 45 minutes. Slight late-run regression
+(0.6562 → 0.6250) is consistent with KL drift starting to dominate the
+small-batch policy gradient signal — a longer run would benefit from a
+higher KL coefficient or KL coefficient schedule.
+
+**Train trajectory (rolling mean window=5):** 0.344 (early) → 0.650
+(late). Train score peaked at 0.8125 at step 16. Per-step variance is
+high (batch 8 × n=4 = 32 samples per step is small for stable
+estimates), but the trend is unambiguous.
+
+**Compute & memory:**
+- Per-step timing: 65 s/step (gen 14.5 s, ref logp 6.5 s, actor update
+  28.6 s, weights resync 8.2 s).
+- Per-GPU peak: `max_memory_allocated_gb=12.07` per A6000.
+- Throughput: ~55 tokens/sec aggregated.
+
+**Artefacts:**
+- Smoke script: `.smoke-tmp/run_verl_qwen35_grpo_real.sh` (gitignored).
+- Full log: `.smoke-tmp/verl_qwen35_real.log` (gitignored).
+- Tiny GSM8K parquets: `.smoke-tmp/data_real/{train,test}.parquet`.
+
+**Conclusion:** `Dockerfile.verl_vllm` satisfies both stated goals:
+1. **Gemma-4 inference via vllm** — Smoke 1, end-to-end PASS.
+2. **Real GRPO training on Qwen3.5-2B with rewards climbing** — Smoke 3,
+   PASS with +60-68 % relative val accuracy in 35 steps / 45 minutes.
+
+Single image, single hardware (4× A6000 / Ampere), no cu13 / no torch
+ABI cascade, no source rebuilds.
