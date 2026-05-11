@@ -29,3 +29,6 @@ tmp/
 .worktrees/
 
 .github
+.smoke-tmp/
+.hf-cache/
+.verl-src/
