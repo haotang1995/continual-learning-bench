@@ -9,7 +9,7 @@
 #   - slimerl/slime ships sgl_kernel that only includes sm90 + sm100 binaries.
 #     Forcing sglang ≥0.5.11 onto it pulled torch 2.11+cu130 and broke slime's
 #     pre-compiled flash_attn / transformer_engine (c10 ABI). See
-#     progress/progress_sglang_upgrade.md for the full story.
+#     progress/progress_verl_vllm.md for the full story.
 #   - verlai/verl:vllm018.dev1 ships torch 2.10+cu129 + flash-attn 2.8.3 +
 #     megatron-core 0.16.0 + nvcc 12.9 toolkit, all aligned. vllm's prebuilt
 #     wheels include sm_86 first-class. Bumping vllm 0.18→0.19 stays within

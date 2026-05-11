@@ -174,7 +174,7 @@ uses `HF_TOKEN` (already set in shell; we'll add it to the `.env` contract).
      `--tp-size 2`). This validates that our sglang install can serve the
      DeepSeek family end-to-end, even if not V4 specifically. Pass
      criterion: one completion.
-   - Document **explicitly in `progress_sglang_upgrade.md`** that full
+   - Document **explicitly in `progress_verl_vllm.md`** that full
      V4-Flash serving is **deferred until Hopper/Blackwell hardware is
      available** and is **not a regression** of this image.
 
@@ -205,11 +205,11 @@ uses `HF_TOKEN` (already set in shell; we'll add it to the `.env` contract).
 3. **If Option A breaks slime's RL loop**, switch to Option B and try
    `slimerl/sglang:v0.5.11` (or whatever the next slime tag is).
 4. **Run smoke #3** (Qwen3.5-2B GRPO). Capture logs to
-   `progress/progress_sglang_upgrade.md`.
+   `progress/progress_verl_vllm.md`.
 5. **Run smoke #2** (DeepSeek-V4-Flash) only on a multi-GPU host;
    otherwise document as "deferred — needs ≥8×H100 / B200".
 6. **Commit** the working Dockerfile change. Update
-   `progress/progress_sglang_upgrade.md` with all attempts (including
+   `progress/progress_verl_vllm.md` with all attempts (including
    failures).
 
 ## Risks and unknowns

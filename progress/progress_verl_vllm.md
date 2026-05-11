@@ -1,7 +1,7 @@
 # Progress: sglang upgrade — Dockerfile.newer_sglang
 
 Append-only log of every attempt (per AI.md rule 2). See
-`plan_sglang_upgrade.md` for the static plan and `current_progress.md` for
+`plan_verl_vllm.md` for the static plan and `current_progress.md` for
 the live status of the in-flight attempt.
 
 ## Attempt 0 — Research and version pinning (success)

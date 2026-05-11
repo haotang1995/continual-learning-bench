@@ -1,7 +1,7 @@
 # Current attempt: sglang upgrade — Dockerfile.newer_sglang
 
 **Live status doc** for the in-flight attempt. Overwrite freely (per AI.md
-rule 2B). Permanent history lives in `progress_sglang_upgrade.md`.
+rule 2B). Permanent history lives in `progress_verl_vllm.md`.
 
 The previous "current attempt" (OAI proxy / X-API-Key wiring) is
 complete; its frozen final state is preserved in
@@ -16,7 +16,7 @@ tests pass on 4×A6000.
 ## Steps
 
 - [x] **Research:** confirm version targets, hardware constraints, HF
-      access. (See Attempt 0 in `progress_sglang_upgrade.md`.)
+      access. (See Attempt 0 in `progress_verl_vllm.md`.)
 - [x] **Write `Dockerfile.newer_sglang`.** Copies the existing Dockerfile
       with a 3-step version-bump (sglang==0.5.11 + cu13 LD_LIBRARY_PATH +
       FLASHINFER_DISABLE_VERSION_CHECK).
